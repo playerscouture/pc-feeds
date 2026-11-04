@@ -10,8 +10,10 @@ This script:
   2. fills safe defaults where a product never had the value (brand, currency, delivery
      cost, language, ships from, in stock, condition, Google category by product type...)
   3. tidies inconsistent values (e.g. "Free UK delivery" -> 0.00, "Y" -> Yes, "FALSE" -> no)
-  4. keeps the column order exactly the same, so the Awin column mapping is unchanged
-  5. writes a gzipped CSV (and a plain CSV if a second output path ends in .csv)
+  4. leaves out hidden products that are not for sale on their own, such as the garment
+     upgrade options (product type "Upgrade" or tagged pc-hidden)
+  5. keeps the column order exactly the same, so the Awin column mapping is unchanged
+  6. writes a gzipped CSV (and a plain CSV if a second output path ends in .csv)
 
 It only changes the feed file, never the store.
 Usage: python3 awin_feed_fix.py <matrixify_export.csv> <out.csv.gz> [out.csv]
@@ -63,6 +65,11 @@ def rows_of(path):
 hdr, r = rows_of(src)
 mf = {i: key_of(h) for i, h in enumerate(hdr) if h.startswith('Metafield:')}
 iid, itype = hdr.index('ID'), hdr.index('Type')
+itags = hdr.index('Tags')
+
+def hidden(row):
+    tags = [t.strip().lower() for t in row[itags].split(',')]
+    return row[itype].strip().lower() == 'upgrade' or 'pc-hidden' in tags
 igpc = next(i for i, k in mf.items() if k == 'google_product_category')
 irec = next((i for i, k in mf.items() if k == 'recipient'), None)
 bytype, prev = collections.defaultdict(collections.Counter), None
@@ -83,6 +90,9 @@ for o in outs:
 stats = collections.Counter()
 cur_id, cur = None, None
 for row in r:
+    if hidden(row):
+        stats['hidden_rows_skipped'] += 1
+        continue
     stats['rows'] += 1
     if row[iid] != cur_id:
         cur_id = row[iid]
