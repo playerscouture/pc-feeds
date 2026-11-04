@@ -1,0 +1,76 @@
+name: Awin feed (fill variant rows)
+
+# Matrixify exports the Awin feed daily from 06:00 UTC (takes ~2-3 hours).
+# This checks every hour through the day and rebuilds the fixed feed as soon as a
+# new Matrixify file appears, then publishes it at a permanent URL for Awin:
+#   https://github.com/playerscouture/pc-feeds/releases/download/awin-latest/awin-feed.csv.gz
+on:
+  schedule:
+    - cron: '17 7-20 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even if the Matrixify file has not changed'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: awin-feed
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SRC: ${{ secrets.MATRIXIFY_AWIN_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the latest Matrixify export
+        id: src
+        run: |
+          set -euo pipefail
+          loc=$(curl -sS -o /dev/null -w '%{redirect_url}' "$SRC")
+          job=$(echo "$loc" | sed -nE 's#.*/s0w1aq-qz/([0-9]+)/exported/.*#\1#p')
+          echo "Latest Matrixify job: ${job:-unknown}"
+          last=$(gh release view awin-latest --json body -q .body 2>/dev/null | sed -nE 's/.*matrixify_job=([0-9]+).*/\1/p' || true)
+          echo "Last published job: ${last:-none}"
+          if [ -n "$job" ] && [ "$job" = "$last" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "job=$job" >> "$GITHUB_OUTPUT"
+
+      - name: Download Matrixify file
+        if: steps.src.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          curl -sSL --retry 3 -o export.csv "$SRC"
+          ls -la export.csv
+          head -c 200 export.csv | grep -q '"ID","Handle"' || { echo "Unexpected file"; head -c 500 export.csv; exit 1; }
+
+      - name: Fill variant rows
+        if: steps.src.outputs.skip == 'false'
+        run: |
+          python3 awin_feed_fix.py export.csv awin-feed.csv.gz
+          ls -la awin-feed.csv.gz
+          rows=$(zcat awin-feed.csv.gz | wc -l)
+          echo "rows=$rows"
+          [ "$rows" -gt 100000 ] || { echo "Too few rows, not publishing"; exit 1; }
+
+      - name: Publish
+        if: steps.src.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          notes="Awin feed, every variant row filled. Built $(date -u '+%Y-%m-%d %H:%M UTC') from matrixify_job=${{ steps.src.outputs.job }}"
+          if ! gh release view awin-latest >/dev/null 2>&1; then
+            gh release create awin-latest --title "Awin feed (latest)" --notes "$notes"
+          fi
+          gh release upload awin-latest awin-feed.csv.gz --clobber
+          gh release edit awin-latest --notes "$notes"
